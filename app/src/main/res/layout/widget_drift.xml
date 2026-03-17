@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="@drawable/widget_background"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/widget_button_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="开始"
+        android:textColor="#FFD4A55A"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:fontFamily="sans-serif-light" />
+
+    <TextView
+        android:id="@+id/widget_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="点击开始"
+        android:textColor="#FF4A5568"
+        android:textSize="11sp"
+        android:layout_marginTop="4dp"
+        android:fontFamily="sans-serif-light" />
+
+</LinearLayout>
