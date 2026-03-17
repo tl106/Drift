@@ -1,0 +1,2557 @@
+软件名称：Drift睡眠守护软件 V1.0
+============================================================
+【前30页】
+============================================================
+
+// ===== app/src/main/java/com/drift/sleep/MainActivity.kt =====
+
+package com.drift.sleep
+
+import android.Manifest
+import android.content.ComponentName
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.core.content.ContextCompat
+import com.drift.sleep.data.DriftDatabase
+import com.drift.sleep.data.DriftPreferences
+import com.drift.sleep.receiver.AutoStartReceiver
+import com.drift.sleep.service.DriftService
+import com.drift.sleep.service.MediaControlService
+import com.drift.sleep.ui.DriftApp
+import com.drift.sleep.ui.Page
+import com.drift.sleep.ui.theme.DriftTheme
+import com.drift.sleep.util.BatteryHelper
+import com.drift.sleep.util.ShareCardGenerator
+
+class MainActivity : ComponentActivity() {
+
+    private val isRunning = mutableStateOf(false)
+    private val hasNotificationAccess = mutableStateOf(false)
+    private val hasNotificationPermission = mutableStateOf(false)
+    private val currentPage = mutableStateOf(Page.Home)
+    private val waitMinutes = mutableStateOf(25L)
+    private val fadeMinutes = mutableStateOf(10L)
+    private val autoStartEnabled = mutableStateOf(false)
+    private val autoStartHour = mutableIntStateOf(22)
+    private val autoStartMinute = mutableIntStateOf(30)
+    private val isBatteryOptimized = mutableStateOf(false)
+
+    private lateinit var prefs: DriftPreferences
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasNotificationPermission.value = granted
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        prefs = DriftPreferences(this)
+        waitMinutes.value = prefs.waitMinutes
+        fadeMinutes.value = prefs.fadeMinutes
+        autoStartEnabled.value = prefs.autoStartEnabled
+        autoStartHour.intValue = prefs.autoStartHour
+        autoStartMinute.intValue = prefs.autoStartMinute
+
+        val db = DriftDatabase.getInstance(this)
+
+        setContent {
+            val records by db.sleepRecordDao().getAll().collectAsState(initial = emptyList())
+
+            DriftTheme {
+                DriftApp(
+                    currentPage = currentPage.value,
+                    onPageChange = { currentPage.value = it },
+                    isRunning = isRunning.value,
+                    hasNotificationAccess = hasNotificationAccess.value,
+                    hasNotificationPermission = hasNotificationPermission.value,
+                    onToggle = { toggle() },
+                    onRequestNotificationAccess = { requestNotificationAccess() },
+                    onRequestNotificationPermission = { requestNotificationPermission() },
+                    waitMinutes = waitMinutes.value,
+                    fadeMinutes = fadeMinutes.value,
+                    onWaitChange = { minutes ->
+                        waitMinutes.value = minutes
+                        prefs.waitMinutes = minutes
+                    },
+                    onFadeChange = { minutes ->
+                        fadeMinutes.value = minutes
+                        prefs.fadeMinutes = minutes
+                    },
+                    autoStartEnabled = autoStartEnabled.value,
+                    autoStartHour = autoStartHour.intValue,
+                    autoStartMinute = autoStartMinute.intValue,
+                    onAutoStartToggle = { enabled ->
+                        autoStartEnabled.value = enabled
+                        prefs.autoStartEnabled = enabled
+                        if (enabled) {
+                            AutoStartReceiver.scheduleAutoStart(this, autoStartHour.intValue, autoStartMinute.intValue)
+                        } else {
+                            AutoStartReceiver.cancelAutoStart(this)
+                        }
+                    },
+                    onAutoStartTimeChange = { hour, minute ->
+                        autoStartHour.intValue = hour
+                        autoStartMinute.intValue = minute
+                        prefs.autoStartHour = hour
+                        prefs.autoStartMinute = minute
+                        if (autoStartEnabled.value) {
+                            AutoStartReceiver.scheduleAutoStart(this, hour, minute)
+                        }
+                    },
+                    isBatteryOptimized = isBatteryOptimized.value,
+                    onRequestBatteryOptimization = {
+                        BatteryHelper.requestIgnoreBatteryOptimizations(this)
+                    },
+                    batteryTip = BatteryHelper.getManufacturerTip(),
+                    records = records,
+                    onShareRecord = { record ->
+                        ShareCardGenerator.generateAndShare(this@MainActivity, record)
+                    }
+                )
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        hasNotificationAccess.value = isNotificationListenerEnabled()
+        hasNotificationPermission.value = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        } else true
+        isRunning.value = DriftService.isRunning
+        isBatteryOptimized.value = BatteryHelper.isIgnoringBatteryOptimizations(this)
+    }
+
+    private fun toggle() {
+        if (isRunning.value) {
+            stopDriftService()
+        } else {
+            startDriftService()
+        }
+        isRunning.value = !isRunning.value
+    }
+
+    private fun startDriftService() {
+        val intent = Intent(this, DriftService::class.java)
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun stopDriftService() {
+        val intent = Intent(this, DriftService::class.java)
+        stopService(intent)
+    }
+
+    private fun isNotificationListenerEnabled(): Boolean {
+        val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+        val componentName = ComponentName(this, MediaControlService::class.java)
+        return flat?.contains(componentName.flattenToString()) == true
+    }
+
+    private fun requestNotificationAccess() {
+        startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/data/DriftDatabase.kt =====
+
+package com.drift.sleep.data
+
+import android.content.Context
+import androidx.room.Database
+import androidx.room.Room
+import androidx.room.RoomDatabase
+
+@Database(entities = [SleepRecord::class], version = 1)
+abstract class DriftDatabase : RoomDatabase() {
+    abstract fun sleepRecordDao(): SleepRecordDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: DriftDatabase? = null
+
+        fun getInstance(context: Context): DriftDatabase {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    DriftDatabase::class.java,
+                    "drift_db"
+                ).build().also { INSTANCE = it }
+            }
+        }
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/data/DriftPreferences.kt =====
+
+package com.drift.sleep.data
+
+import android.content.Context
+
+class DriftPreferences(context: Context) {
+
+    private val prefs = context.getSharedPreferences("drift_prefs", Context.MODE_PRIVATE)
+
+    var waitMinutes: Long
+        get() = prefs.getLong("wait_minutes", 25L)
+        set(value) = prefs.edit().putLong("wait_minutes", value).apply()
+
+    var fadeMinutes: Long
+        get() = prefs.getLong("fade_minutes", 10L)
+        set(value) = prefs.edit().putLong("fade_minutes", value).apply()
+
+    var autoStartEnabled: Boolean
+        get() = prefs.getBoolean("auto_start_enabled", false)
+        set(value) = prefs.edit().putBoolean("auto_start_enabled", value).apply()
+
+    var autoStartHour: Int
+        get() = prefs.getInt("auto_start_hour", 22)
+        set(value) = prefs.edit().putInt("auto_start_hour", value).apply()
+
+    var autoStartMinute: Int
+        get() = prefs.getInt("auto_start_minute", 30)
+        set(value) = prefs.edit().putInt("auto_start_minute", value).apply()
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/data/SleepRecord.kt =====
+
+package com.drift.sleep.data
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+@Entity
+data class SleepRecord(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val startTime: Long,
+    val pauseTime: Long,
+    val pausedApp: String?
+)
+
+
+// ===== app/src/main/java/com/drift/sleep/data/SleepRecordDao.kt =====
+
+package com.drift.sleep.data
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface SleepRecordDao {
+    @Insert
+    fun insert(record: SleepRecord)
+
+    @Query("SELECT * FROM SleepRecord ORDER BY pauseTime DESC")
+    fun getAll(): Flow<List<SleepRecord>>
+
+    @Query("DELETE FROM SleepRecord")
+    fun deleteAll()
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/receiver/AutoStartReceiver.kt =====
+
+package com.drift.sleep.receiver
+
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.util.Log
+import androidx.core.content.ContextCompat
+import com.drift.sleep.data.DriftPreferences
+import com.drift.sleep.service.DriftService
+import java.util.Calendar
+
+class AutoStartReceiver : BroadcastReceiver() {
+
+    companion object {
+        const val TAG = "AutoStartReceiver"
+        private const val REQUEST_CODE = 100
+
+        fun scheduleAutoStart(context: Context, hour: Int, minute: Int) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val intent = Intent(context, AutoStartReceiver::class.java)
+            val pendingIntent = PendingIntent.getBroadcast(
+                context, REQUEST_CODE, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val calendar = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, hour)
+                set(Calendar.MINUTE, minute)
+                set(Calendar.SECOND, 0)
+                if (before(Calendar.getInstance())) {
+                    add(Calendar.DAY_OF_MONTH, 1)
+                }
+            }
+
+            alarmManager.setRepeating(
+                AlarmManager.RTC_WAKEUP,
+                calendar.timeInMillis,
+                AlarmManager.INTERVAL_DAY,
+                pendingIntent
+            )
+
+            Log.d(TAG, "Auto-start scheduled for $hour:${minute.toString().padStart(2, '0')} daily")
+        }
+
+        fun cancelAutoStart(context: Context) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val intent = Intent(context, AutoStartReceiver::class.java)
+            val pendingIntent = PendingIntent.getBroadcast(
+                context, REQUEST_CODE, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            alarmManager.cancel(pendingIntent)
+            Log.d(TAG, "Auto-start cancelled")
+        }
+    }
+
+    override fun onReceive(context: Context, intent: Intent) {
+        Log.d(TAG, "Auto-start triggered")
+        if (!DriftService.isRunning) {
+            val serviceIntent = Intent(context, DriftService::class.java)
+            ContextCompat.startForegroundService(context, serviceIntent)
+        }
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/receiver/BootReceiver.kt =====
+
+package com.drift.sleep.receiver
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.util.Log
+import com.drift.sleep.data.DriftPreferences
+
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+            val prefs = DriftPreferences(context)
+            if (prefs.autoStartEnabled) {
+                AutoStartReceiver.scheduleAutoStart(
+                    context, prefs.autoStartHour, prefs.autoStartMinute
+                )
+                Log.d("BootReceiver", "Re-scheduled auto-start after boot")
+            }
+        }
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/receiver/ScreenStateReceiver.kt =====
+
+package com.drift.sleep.receiver
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.util.Log
+
+class ScreenStateReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        Log.d("ScreenStateReceiver", "Screen event: ${intent.action}")
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/service/DriftService.kt =====
+
+package com.drift.sleep.service
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.media.AudioManager
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import com.drift.sleep.MainActivity
+import com.drift.sleep.R
+import com.drift.sleep.data.DriftDatabase
+import com.drift.sleep.data.DriftPreferences
+import com.drift.sleep.data.SleepRecord
+import kotlin.math.sqrt
+
+class DriftService : Service(), SensorEventListener {
+
+    companion object {
+        const val TAG = "DriftService"
+        const val CHANNEL_ID = "drift_service"
+        const val NOTIFICATION_ID = 1
+        const val RESULT_CHANNEL_ID = "drift_result"
+        const val RESULT_NOTIFICATION_ID = 2
+
+        const val ACTION_STOP = "com.drift.sleep.STOP"
+
+        var isRunning = false
+            private set
+    }
+
+    private lateinit var sensorManager: SensorManager
+    private lateinit var audioManager: AudioManager
+    private lateinit var handler: Handler
+
+    private var waitMinutes = 25L
+    private var fadeMinutes = 10L
+
+    private var lastActivityTime = 0L
+    private var isFading = false
+    private var originalVolume = 0
+    private var fadeStartTime = 0L
+    private var startTime = 0L
+    private var pausedApp: String? = null
+    private var isRestoring = false
+    private var restoreTargetVolume = 0
+
+    // Shake detection
+    private var lastShakeTime = 0L
+    private var lastAccelX = 0f
+    private var lastAccelY = 0f
+    private var lastAccelZ = 0f
+    private var lastAccelTime = 0L
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_ON -> {
+                    Log.d(TAG, "Screen ON - user active")
+                    onActivityDetected("screen_on")
+                }
+            }
+        }
+    }
+
+    private val volumeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (!isFading) {
+                Log.d(TAG, "Volume changed by user")
+                onActivityDetected("volume_change")
+            }
+        }
+    }
+
+    private val checkRunnable = object : Runnable {
+        override fun run() {
+            checkInactivity()
+            handler.postDelayed(this, 5000)
+        }
+    }
+
+    private val fadeRunnable = object : Runnable {
+        override fun run() {
+            if (!isFading) return
+            performFadeStep()
+            handler.postDelayed(this, 2000)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        handler = Handler(Looper.getMainLooper())
+        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // Read config from preferences
+        val prefs = DriftPreferences(this)
+        waitMinutes = prefs.waitMinutes
+        fadeMinutes = prefs.fadeMinutes
+
+        createNotificationChannels()
+        startForeground(NOTIFICATION_ID, buildNotification("正在监听..."))
+
+        startDetection()
+        isRunning = true
+
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopDetection()
+        isRunning = false
+
+        if (isFading) {
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, originalVolume, 0)
+            isFading = false
+        }
+
+        Log.d(TAG, "Service destroyed")
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    // --- Detection Logic ---
+
+    private fun startDetection() {
+        lastActivityTime = System.currentTimeMillis()
+        startTime = System.currentTimeMillis()
+        isFading = false
+
+        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { sensor ->
+            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        }
+
+        val screenFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        registerReceiver(screenReceiver, screenFilter)
+
+        val volumeFilter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
+        registerReceiver(volumeReceiver, volumeFilter)
+
+        handler.post(checkRunnable)
+
+        Log.d(TAG, "Detection started. Wait: ${waitMinutes}min, Fade: ${fadeMinutes}min")
+    }
+
+    private fun stopDetection() {
+        sensorManager.unregisterListener(this)
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(volumeReceiver) } catch (_: Exception) {}
+        handler.removeCallbacks(checkRunnable)
+        handler.removeCallbacks(fadeRunnable)
+        handler.removeCallbacks(restoreRunnable)
+    }
+
+    // --- Gradual Volume Restore ---
+
+    private val restoreRunnable = object : Runnable {
+        override fun run() {
+            if (!isRestoring) return
+            val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (current >= restoreTargetVolume) {
+                isRestoring = false
+                Log.d(TAG, "Volume restored to $restoreTargetVolume")
+                return
+            }
+            // Increase by 1 step every 667ms → ~10 seconds to restore full volume
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, current + 1, 0)
+            handler.postDelayed(this, 667)
+        }
+    }
+
+    private fun startGradualRestore() {
+        restoreTargetVolume = originalVolume
+        isRestoring = true
+        handler.post(restoreRunnable)
+    }
+
+    private fun onActivityDetected(source: String) {
+        lastActivityTime = System.currentTimeMillis()
+
+        if (isFading) {
+            Log.d(TAG, "Activity during fade ($source) - restoring volume gradually")
+            isFading = false
+            handler.removeCallbacks(fadeRunnable)
+            startGradualRestore()
+            updateNotification("检测到活动，重新开始等待...")
+        } else {
+            Log.d(TAG, "Activity detected ($source) - timer reset")
+        }
+    }
+
+    private fun checkInactivity() {
+        if (isFading) return
+
+        val elapsed = System.currentTimeMillis() - lastActivityTime
+        val waitMs = waitMinutes * 60 * 1000
+
+        if (elapsed >= waitMs) {
+            startFade()
+        } else {
+            val remainingMin = (waitMs - elapsed) / 60000
+            updateNotification("已安静 ${elapsed / 60000} 分钟，还需 ${remainingMin} 分钟")
+        }
+    }
+
+    // --- Fade Logic ---
+
+    private fun startFade() {
+        originalVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        if (originalVolume == 0) {
+            pauseMedia()
+            saveRecord()
+            showResultNotification()
+            stopSelf()
+            return
+        }
+
+        isFading = true
+        fadeStartTime = System.currentTimeMillis()
+        updateNotification("正在渐弱音量...")
+        Log.d(TAG, "Starting fade. Original volume: $originalVolume, Fade time: ${fadeMinutes}min")
+
+        handler.post(fadeRunnable)
+    }
+
+    private fun performFadeStep() {
+        val elapsed = System.currentTimeMillis() - fadeStartTime
+        val fadeMs = fadeMinutes * 60 * 1000
+        val progress = (elapsed.toFloat() / fadeMs).coerceIn(0f, 1f)
+        val targetVolume = (originalVolume * (1f - progress)).toInt()
+
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVolume, 0)
+
+        if (progress >= 1f) {
+            isFading = false
+            handler.removeCallbacks(fadeRunnable)
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+            pauseMedia()
+            saveRecord()
+            showResultNotification()
+            Log.d(TAG, "Fade complete. Media paused.")
+            stopSelf()
+        }
+    }
+
+    private fun pauseMedia() {
+        pausedApp = MediaControlService.pauseCurrentMedia()
+    }
+
+    private fun saveRecord() {
+        val record = SleepRecord(
+            startTime = startTime,
+            pauseTime = System.currentTimeMillis(),
+            pausedApp = pausedApp
+        )
+        Thread {
+            DriftDatabase.getInstance(this).sleepRecordDao().insert(record)
+            Log.d(TAG, "Sleep record saved")
+        }.start()
+    }
+
+    // --- Accelerometer / Shake Detection ---
+
+    override fun onSensorChanged(event: SensorEvent) {
+        if (event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
+
+        val x = event.values[0]
+        val y = event.values[1]
+        val z = event.values[2]
+        val now = System.currentTimeMillis()
+
+        if (lastAccelTime > 0) {
+            val dt = now - lastAccelTime
+            if (dt > 0) {
+                val dx = x - lastAccelX
+                val dy = y - lastAccelY
+                val dz = z - lastAccelZ
+                val acceleration = sqrt((dx * dx + dy * dy + dz * dz).toDouble()) / dt * 1000
+
+                if (acceleration > 25 && now - lastShakeTime > 2000) {
+                    lastShakeTime = now
+                    onShakeDetected()
+                }
+
+                if (acceleration > 5 && now - lastActivityTime > 3000) {
+                    onActivityDetected("accelerometer")
+                }
+            }
+        }
+
+        lastAccelX = x
+        lastAccelY = y
+        lastAccelZ = z
+        lastAccelTime = now
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    private fun onShakeDetected() {
+        Log.d(TAG, "Shake detected!")
+        val vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator
+        vibrator.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
+        onActivityDetected("shake")
+    }
+
+    // --- Notifications ---
+
+    private fun createNotificationChannels() {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+
+        val serviceChannel = NotificationChannel(
+            CHANNEL_ID, "Drift 运行状态", NotificationManager.IMPORTANCE_LOW
+        ).apply { description = "Drift正在后台监测睡眠状态" }
+        manager.createNotificationChannel(serviceChannel)
+
+        val resultChannel = NotificationChannel(
+            RESULT_CHANNEL_ID, "Drift 睡眠报告", NotificationManager.IMPORTANCE_DEFAULT
+        ).apply { description = "Drift的睡眠检测结果" }
+        manager.createNotificationChannel(resultChannel)
+    }
+
+    private fun buildNotification(text: String): Notification {
+        val openIntent = Intent(this, MainActivity::class.java)
+        val openPending = PendingIntent.getActivity(this, 0, openIntent, PendingIntent.FLAG_IMMUTABLE)
+        val stopIntent = Intent(this, DriftService::class.java).apply { action = ACTION_STOP }
+        val stopPending = PendingIntent.getService(this, 1, stopIntent, PendingIntent.FLAG_IMMUTABLE)
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Drift")
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(openPending)
+            .addAction(R.drawable.ic_notification, "停止", stopPending)
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
+    }
+
+    private fun updateNotification(text: String) {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, buildNotification(text))
+    }
+
+    private fun showResultNotification() {
+        val startHour = android.text.format.DateFormat.format("HH:mm", startTime)
+        val endHour = android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis())
+        val appName = pausedApp ?: "媒体"
+
+        val notification = NotificationCompat.Builder(this, RESULT_CHANNEL_ID)
+            .setContentTitle("晚安 \uD83C\uDF19")
+            .setContentText("$startHour 开始监听，$endHour 帮你暂停了$appName。")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setAutoCancel(true)
+            .build()
+
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(RESULT_NOTIFICATION_ID, notification)
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/service/MediaControlService.kt =====
+
+package com.drift.sleep.service
+
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
+import android.service.notification.NotificationListenerService
+import android.service.notification.StatusBarNotification
+import android.util.Log
+import android.content.ComponentName
+import android.content.Context
+
+class MediaControlService : NotificationListenerService() {
+
+    companion object {
+        const val TAG = "MediaControlService"
+
+        private var instance: MediaControlService? = null
+
+        /**
+         * Pause whatever media is currently playing.
+         * Returns the name of the paused app, or null if nothing was playing.
+         */
+        fun pauseCurrentMedia(): String? {
+            return instance?.doPauseMedia()
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        Log.d(TAG, "MediaControlService created")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        instance = null
+        Log.d(TAG, "MediaControlService destroyed")
+    }
+
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {}
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {}
+
+    private fun doPauseMedia(): String? {
+        try {
+            val manager = getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+            val componentName = ComponentName(this, MediaControlService::class.java)
+            val controllers = manager.getActiveSessions(componentName)
+
+            for (controller in controllers) {
+                val state = controller.playbackState
+                if (state != null && state.state == PlaybackState.STATE_PLAYING) {
+                    val appName = controller.packageName
+                    controller.transportControls.pause()
+                    Log.d(TAG, "Paused media from: $appName")
+                    return getAppLabel(appName)
+                }
+            }
+
+            // No active playing session found, try sending pause to all
+            for (controller in controllers) {
+                controller.transportControls.pause()
+                Log.d(TAG, "Sent pause to: ${controller.packageName}")
+                return getAppLabel(controller.packageName)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error pausing media", e)
+        }
+        return null
+    }
+
+    private fun getAppLabel(packageName: String): String {
+        return try {
+            val pm = packageManager
+            val appInfo = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(appInfo).toString()
+        } catch (e: Exception) {
+            packageName
+        }
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/ui/DriftApp.kt =====
+
+package com.drift.sleep.ui
+
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.NightsStay
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.drift.sleep.data.SleepRecord
+import com.drift.sleep.ui.theme.Amber
+import com.drift.sleep.ui.theme.AmberGlow
+import com.drift.sleep.ui.theme.DeepSea
+import com.drift.sleep.ui.theme.Mist
+import com.drift.sleep.ui.theme.Moonlight
+import com.drift.sleep.ui.theme.Slate
+import com.drift.sleep.ui.theme.SoftRed
+import com.drift.sleep.ui.theme.Void
+
+enum class Page { Home, History, Settings }
+
+@Composable
+fun DriftApp(
+    currentPage: Page,
+    onPageChange: (Page) -> Unit,
+    isRunning: Boolean,
+    hasNotificationAccess: Boolean,
+    hasNotificationPermission: Boolean,
+    onToggle: () -> Unit,
+    onRequestNotificationAccess: () -> Unit,
+    onRequestNotificationPermission: () -> Unit,
+    waitMinutes: Long,
+    fadeMinutes: Long,
+    onWaitChange: (Long) -> Unit,
+    onFadeChange: (Long) -> Unit,
+    autoStartEnabled: Boolean,
+    autoStartHour: Int,
+    autoStartMinute: Int,
+    onAutoStartToggle: (Boolean) -> Unit,
+    onAutoStartTimeChange: (Int, Int) -> Unit,
+    isBatteryOptimized: Boolean,
+    onRequestBatteryOptimization: () -> Unit,
+    batteryTip: String,
+    records: List<SleepRecord>,
+    onShareRecord: (SleepRecord) -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Void)
+    ) {
+        // Shared ambient background
+        AmbientBackground(isRunning = isRunning && currentPage == Page.Home)
+
+        // Page content
+        when (currentPage) {
+            Page.Home -> HomeScreen(
+                isRunning = isRunning,
+                hasNotificationAccess = hasNotificationAccess,
+                hasNotificationPermission = hasNotificationPermission,
+                onToggle = onToggle,
+                onRequestNotificationAccess = onRequestNotificationAccess,
+                onRequestNotificationPermission = onRequestNotificationPermission
+            )
+            Page.History -> HistoryScreen(records = records, onShareRecord = onShareRecord)
+            Page.Settings -> SettingsScreen(
+                waitMinutes = waitMinutes,
+                fadeMinutes = fadeMinutes,
+                onWaitChange = onWaitChange,
+                onFadeChange = onFadeChange,
+                autoStartEnabled = autoStartEnabled,
+                autoStartHour = autoStartHour,
+                autoStartMinute = autoStartMinute,
+                onAutoStartToggle = onAutoStartToggle,
+                onAutoStartTimeChange = onAutoStartTimeChange,
+                isBatteryOptimized = isBatteryOptimized,
+                onRequestBatteryOptimization = onRequestBatteryOptimization,
+                batteryTip = batteryTip
+            )
+        }
+
+        // Bottom navigation
+        BottomNavBar(
+            currentPage = currentPage,
+            onPageChange = onPageChange,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
+    }
+}
+
+// --- Home Screen ---
+
+@Composable
+private fun HomeScreen(
+    isRunning: Boolean,
+    hasNotificationAccess: Boolean,
+    hasNotificationPermission: Boolean,
+    onToggle: () -> Unit,
+    onRequestNotificationAccess: () -> Unit,
+    onRequestNotificationPermission: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 40.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Spacer(modifier = Modifier.weight(1f))
+
+        // Permission cards
+        if (!hasNotificationPermission) {
+            PermissionCard(
+                label = "通知权限",
+                description = "显示运行状态",
+                actionText = "授权",
+                onClick = onRequestNotificationPermission
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+        if (!hasNotificationAccess) {
+            PermissionCard(
+                label = "通知访问",
+                description = "暂停其他App的播放",
+                actionText = "去设置",
+                onClick = onRequestNotificationAccess
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+
+        // Title
+        Text(
+            text = "drift",
+            color = if (isRunning) Moonlight.copy(alpha = 0.5f) else Moonlight,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Light,
+            letterSpacing = 8.sp
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        val statusText = when {
+            !hasNotificationAccess -> "需要权限设置"
+            isRunning -> "正在守护你的睡眠"
+            else -> "安心入睡"
+        }
+        Text(
+            text = statusText,
+            color = Mist,
+            fontSize = 13.sp,
+            letterSpacing = 2.sp
+        )
+
+        Spacer(modifier = Modifier.weight(0.8f))
+
+        // Main button
+        DriftButton(
+            isRunning = isRunning,
+            enabled = hasNotificationAccess,
+            onClick = onToggle
+        )
+
+        Spacer(modifier = Modifier.weight(0.8f))
+
+        // Hint
+        val hintText = when {
+            isRunning -> "切到你想听的App，安心入睡\n摇一摇可以恢复音量"
+            !hasNotificationAccess -> ""
+            else -> "点击开始，然后去听你喜欢的内容\n睡着后会自动帮你暂停"
+        }
+        if (hintText.isNotEmpty()) {
+            Text(
+                text = hintText,
+                color = Mist.copy(alpha = 0.7f),
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+                lineHeight = 22.sp,
+                fontWeight = FontWeight.Light
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(0.5f))
+        // Space for bottom nav
+        Spacer(modifier = Modifier.height(72.dp))
+    }
+}
+
+// --- Ambient Background ---
+
+@Composable
+private fun AmbientBackground(isRunning: Boolean) {
+    val ambientAlpha by animateFloatAsState(
+        targetValue = if (isRunning) 0.15f else 0.06f,
+        animationSpec = tween(2000),
+        label = "ambientAlpha"
+    )
+
+    val infiniteTransition = rememberInfiniteTransition(label = "ambient")
+    val drift by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(20000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "drift"
+    )
+
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val w = size.width
+        val h = size.height
+
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    if (isRunning) Amber.copy(alpha = ambientAlpha) else Color(0xFF1E3A5F).copy(alpha = ambientAlpha),
+                    Color.Transparent
+                ),
+                center = Offset(w * 0.5f, h * (0.38f + drift * 0.04f)),
+                radius = w * 0.8f
+            ),
+            center = Offset(w * 0.5f, h * (0.38f + drift * 0.04f)),
+            radius = w * 0.8f
+        )
+
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(DeepSea.copy(alpha = 0.3f), Color.Transparent),
+                center = Offset(w * 0.3f, h * 0.85f),
+                radius = w * 0.5f
+            ),
+            center = Offset(w * 0.3f, h * 0.85f),
+            radius = w * 0.5f
+        )
+    }
+}
+
+// --- Drift Button ---
+
+@Composable
+private fun DriftButton(isRunning: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val infiniteTransition = rememberInfiniteTransition(label = "breathe")
+    val breathe by infiniteTransition.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(4000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "breathe"
+    )
+
+    val glowAlpha = if (isRunning) 0.2f + breathe * 0.3f else 0f
+    val glowScale = if (isRunning) 1.15f + breathe * 0.15f else 1f
+
+    val buttonColor by animateColorAsState(
+        targetValue = when {
+            !enabled -> Slate.copy(alpha = 0.5f)
+            isRunning -> SoftRed
+            else -> Amber
+        },
+        animationSpec = tween(600),
+        label = "buttonColor"
+    )
+
+    val buttonScale by animateFloatAsState(
+        targetValue = if (isRunning) 0.92f else 1f,
+        animationSpec = tween(600),
+        label = "buttonScale"
+    )
+
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(280.dp)) {
+        // Breathing glow — use Canvas radialGradient for smooth circular falloff
+        if (isRunning) {
+            Canvas(
+                modifier = Modifier
+                    .size(280.dp)
+                    .scale(glowScale)
+                    .alpha(glowAlpha)
+            ) {
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            Amber.copy(alpha = 0.6f),
+                            Amber.copy(alpha = 0.2f),
+                            Color.Transparent
+                        ),
+                        center = center,
+                        radius = size.minDimension / 2f
+                    ),
+                    radius = size.minDimension / 2f
+                )
+            }
+        }
+
+        // Subtle outer ring
+        Canvas(
+            modifier = Modifier
+                .size(200.dp)
+                .scale(buttonScale)
+        ) {
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        buttonColor.copy(alpha = 0.08f),
+                        buttonColor.copy(alpha = 0.02f),
+                        Color.Transparent
+                    ),
+                    center = center,
+                    radius = size.minDimension / 2f
+                ),
+                radius = size.minDimension / 2f
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .size(160.dp)
+                .scale(buttonScale)
+                .clip(CircleShape)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(buttonColor, buttonColor.copy(alpha = 0.75f))
+                    )
+                )
+                .clickable(
+                    enabled = enabled,
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { onClick() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (isRunning) "停止" else "开始",
+                color = if (isRunning) Color.White.copy(alpha = 0.9f) else Void,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 4.sp
+            )
+        }
+    }
+}
+
+// --- Bottom Nav ---
+
+@Composable
+private fun BottomNavBar(
+    currentPage: Page,
+    onPageChange: (Page) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(Color.Transparent, Void.copy(alpha = 0.95f), Void),
+                    startY = 0f,
+                    endY = 80f
+                )
+            )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 40.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            NavItem(
+                icon = Icons.Rounded.NightsStay,
+                label = "首页",
+                selected = currentPage == Page.Home,
+                onClick = { onPageChange(Page.Home) }
+            )
+            NavItem(
+                icon = Icons.Rounded.History,
+                label = "记录",
+                selected = currentPage == Page.History,
+                onClick = { onPageChange(Page.History) }
+            )
+            NavItem(
+                icon = Icons.Rounded.Settings,
+                label = "设置",
+                selected = currentPage == Page.Settings,
+                onClick = { onPageChange(Page.Settings) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun NavItem(
+    icon: ImageVector,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val color by animateColorAsState(
+        targetValue = if (selected) Amber else Mist.copy(alpha = 0.6f),
+        animationSpec = tween(200),
+        label = "navColor"
+    )
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onClick() }
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = color,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = label,
+            color = color,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal
+        )
+    }
+}
+
+// --- Permission Card ---
+
+@Composable
+private fun PermissionCard(
+    label: String,
+    description: String,
+    actionText: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable { onClick() },
+        color = Slate.copy(alpha = 0.3f),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(text = label, color = Moonlight, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(text = description, color = Mist, fontSize = 12.sp, fontWeight = FontWeight.Light)
+            }
+            Text(text = actionText, color = Amber, fontSize = 13.sp, fontWeight = FontWeight.Medium, letterSpacing = 1.sp)
+        }
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/ui/HistoryScreen.kt =====
+
+package com.drift.sleep.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.drift.sleep.data.SleepRecord
+import com.drift.sleep.ui.theme.Amber
+import com.drift.sleep.ui.theme.Mist
+import com.drift.sleep.ui.theme.Moonlight
+import com.drift.sleep.ui.theme.Slate
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+@Composable
+fun HistoryScreen(
+    records: List<SleepRecord>,
+    onShareRecord: ((SleepRecord) -> Unit)? = null
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp, vertical = 48.dp)
+    ) {
+        Text(
+            text = "记录",
+            color = Moonlight,
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Light,
+            letterSpacing = 2.sp
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        if (records.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "还没有记录",
+                        color = Mist,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Light
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "完成一次检测后这里会显示记录",
+                        color = Mist.copy(alpha = 0.5f),
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        } else {
+            val grouped = remember(records) {
+                records.groupBy { record ->
+                    SimpleDateFormat("M月d日", Locale.CHINESE).format(Date(record.pauseTime))
+                }
+            }
+
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                grouped.forEach { (date, dayRecords) ->
+                    item {
+                        Text(
+                            text = date,
+                            color = Mist,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                        )
+                    }
+
+                    items(dayRecords) { record ->
+                        RecordCard(record = record, onShare = onShareRecord)
+                    }
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(80.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecordCard(record: SleepRecord, onShare: ((SleepRecord) -> Unit)? = null) {
+    val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val startStr = timeFormat.format(Date(record.startTime))
+    val pauseStr = timeFormat.format(Date(record.pauseTime))
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Slate.copy(alpha = 0.3f),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Amber dot
+            Box(
+
+============================================================
+【后30页】
+============================================================
+
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(Amber, CircleShape)
+            )
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "$startStr → $pauseStr",
+                    color = Moonlight,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 1.sp
+                )
+                if (record.pausedApp != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "暂停了 ${record.pausedApp}",
+                        color = Mist,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+
+            if (onShare != null) {
+                IconButton(onClick = { onShare(record) }) {
+                    Icon(
+                        imageVector = Icons.Rounded.Share,
+                        contentDescription = "分享",
+                        tint = Mist,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/ui/SettingsScreen.kt =====
+
+package com.drift.sleep.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.drift.sleep.ui.theme.Amber
+import com.drift.sleep.ui.theme.DeepSea
+import com.drift.sleep.ui.theme.Mist
+import com.drift.sleep.ui.theme.Moonlight
+import com.drift.sleep.ui.theme.Slate
+import com.drift.sleep.ui.theme.Void
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun SettingsScreen(
+    waitMinutes: Long,
+    fadeMinutes: Long,
+    onWaitChange: (Long) -> Unit,
+    onFadeChange: (Long) -> Unit,
+    autoStartEnabled: Boolean,
+    autoStartHour: Int,
+    autoStartMinute: Int,
+    onAutoStartToggle: (Boolean) -> Unit,
+    onAutoStartTimeChange: (Int, Int) -> Unit,
+    isBatteryOptimized: Boolean,
+    onRequestBatteryOptimization: () -> Unit,
+    batteryTip: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 32.dp, vertical = 48.dp)
+    ) {
+        Text(
+            text = "设置",
+            color = Moonlight,
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Light,
+            letterSpacing = 2.sp
+        )
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        // --- Timer Settings ---
+        SectionLabel("等待时间")
+        Spacer(modifier = Modifier.height(6.dp))
+        SectionHint("开始监听后，等待此时间无活动则开始降低音量")
+        Spacer(modifier = Modifier.height(14.dp))
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            listOf(15L, 20L, 25L, 30L, 40L).forEach { minutes ->
+                ChipButton(
+                    text = "${minutes} 分钟",
+                    selected = waitMinutes == minutes,
+                    onClick = { onWaitChange(minutes) }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        SectionLabel("渐弱时间")
+        Spacer(modifier = Modifier.height(6.dp))
+        SectionHint("音量从当前值降到零所需的时间")
+        Spacer(modifier = Modifier.height(14.dp))
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            listOf(5L, 10L, 15L, 20L).forEach { minutes ->
+                ChipButton(
+                    text = "${minutes} 分钟",
+                    selected = fadeMinutes == minutes,
+                    onClick = { onFadeChange(minutes) }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        // --- Auto Start ---
+        SectionLabel("自动启动")
+        Spacer(modifier = Modifier.height(6.dp))
+        SectionHint("每天定时自动开始检测，无需手动打开App")
+        Spacer(modifier = Modifier.height(14.dp))
+
+        SettingsCard {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = if (autoStartEnabled) "每晚 ${autoStartHour}:${autoStartMinute.toString().padStart(2, '0')} 自动启动" else "已关闭",
+                        color = Moonlight,
+                        fontSize = 14.sp
+                    )
+                }
+                Switch(
+                    checked = autoStartEnabled,
+                    onCheckedChange = onAutoStartToggle,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Amber,
+                        checkedTrackColor = Amber.copy(alpha = 0.3f),
+                        uncheckedThumbColor = Mist,
+                        uncheckedTrackColor = Slate
+                    )
+                )
+            }
+
+            if (autoStartEnabled) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    listOf(21 to 30, 22 to 0, 22 to 30, 23 to 0, 23 to 30).forEach { (h, m) ->
+                        val timeStr = "${h}:${m.toString().padStart(2, '0')}"
+                        ChipButton(
+                            text = timeStr,
+                            selected = autoStartHour == h && autoStartMinute == m,
+                            onClick = { onAutoStartTimeChange(h, m) }
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        // --- Battery Optimization ---
+        SectionLabel("后台运行")
+        Spacer(modifier = Modifier.height(6.dp))
+        SectionHint("关闭电池优化，防止系统杀掉Drift后台服务")
+        Spacer(modifier = Modifier.height(14.dp))
+
+        SettingsCard(onClick = if (!isBatteryOptimized) onRequestBatteryOptimization else null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (isBatteryOptimized) "已关闭电池优化 ✓" else "需要关闭电池优化",
+                        color = if (isBatteryOptimized) Amber else Moonlight,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = batteryTip,
+                        color = Mist,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
+                }
+                if (!isBatteryOptimized) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "去设置",
+                        color = Amber,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(56.dp))
+
+        // App info
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(text = "Drift v1.0", color = Mist.copy(alpha = 0.5f), fontSize = 12.sp)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "纯本地运算 · 不上传数据 · 不录音",
+                color = Mist.copy(alpha = 0.4f),
+                fontSize = 11.sp
+            )
+        }
+
+        // Bottom nav space
+        Spacer(modifier = Modifier.height(80.dp))
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text = text,
+        color = Moonlight,
+        fontSize = 16.sp,
+        fontWeight = FontWeight.Medium
+    )
+}
+
+@Composable
+private fun SectionHint(text: String) {
+    Text(
+        text = text,
+        color = Mist,
+        fontSize = 13.sp,
+        lineHeight = 18.sp
+    )
+}
+
+@Composable
+private fun SettingsCard(
+    onClick: (() -> Unit)? = null,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Slate.copy(alpha = 0.25f))
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
+    ) {
+        Column { content() }
+    }
+}
+
+@Composable
+private fun ChipButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (selected) Amber else Slate.copy(alpha = 0.4f))
+            .clickable { onClick() }
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            color = if (selected) Void else Moonlight,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal
+        )
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/ui/theme/Colors.kt =====
+
+package com.drift.sleep.ui.theme
+
+import androidx.compose.ui.graphics.Color
+
+val Void = Color(0xFF060A10)
+val DeepSea = Color(0xFF0A1628)
+val Slate = Color(0xFF1A2540)
+val Mist = Color(0xFF4A5568)
+val Cloud = Color(0xFFCBD5E1)
+val Moonlight = Color(0xFFE8ECF2)
+val Amber = Color(0xFFD4A55A)
+val AmberGlow = Color(0x40D4A55A)
+val SoftRed = Color(0xFFBF5F5F)
+val SoftRedGlow = Color(0x40BF5F5F)
+
+
+// ===== app/src/main/java/com/drift/sleep/ui/theme/Theme.kt =====
+
+package com.drift.sleep.ui.theme
+
+import android.app.Activity
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+
+private val DarkColorScheme = darkColorScheme(
+    primary = Amber,
+    secondary = Mist,
+    background = Void,
+    surface = DeepSea,
+    onPrimary = Void,
+    onSecondary = Moonlight,
+    onBackground = Moonlight,
+    onSurface = Moonlight
+)
+
+@Composable
+fun DriftTheme(content: @Composable () -> Unit) {
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as Activity).window
+            window.statusBarColor = Void.toArgb()
+            window.navigationBarColor = Void.toArgb()
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
+        }
+    }
+
+    MaterialTheme(
+        colorScheme = DarkColorScheme,
+        content = content
+    )
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/util/BatteryHelper.kt =====
+
+package com.drift.sleep.util
+
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+
+/**
+ * Helper to guide users through disabling battery optimization
+ * for Drift on various Chinese Android manufacturers.
+ */
+object BatteryHelper {
+
+    fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    fun requestIgnoreBatteryOptimizations(context: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            // Fallback to general battery settings
+            openBatterySettings(context)
+        }
+    }
+
+    fun openBatterySettings(context: Context) {
+        val manufacturer = Build.MANUFACTURER.lowercase()
+        val intent = when {
+            manufacturer.contains("huawei") || manufacturer.contains("honor") -> huaweiIntent()
+            manufacturer.contains("xiaomi") || manufacturer.contains("redmi") -> xiaomiIntent()
+            manufacturer.contains("oppo") || manufacturer.contains("realme") || manufacturer.contains("oneplus") -> oppoIntent()
+            manufacturer.contains("vivo") -> vivoIntent()
+            manufacturer.contains("samsung") -> samsungIntent()
+            else -> defaultIntent()
+        }
+
+        try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            try {
+                context.startActivity(defaultIntent().apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun getManufacturerTip(): String {
+        val manufacturer = Build.MANUFACTURER.lowercase()
+        return when {
+            manufacturer.contains("huawei") || manufacturer.contains("honor") ->
+                "华为/荣耀：设置 → 电池 → 启动管理 → 找到Drift → 关闭自动管理"
+            manufacturer.contains("xiaomi") || manufacturer.contains("redmi") ->
+                "小米/红米：设置 → 电池与性能 → 应用智能省电 → 找到Drift → 无限制"
+            manufacturer.contains("oppo") || manufacturer.contains("realme") || manufacturer.contains("oneplus") ->
+                "OPPO/一加：设置 → 电池 → 更多电池设置 → 优化电池使用 → 找到Drift → 不优化"
+            manufacturer.contains("vivo") ->
+                "vivo：设置 → 电池 → 后台高耗电 → 允许Drift后台运行"
+            manufacturer.contains("samsung") ->
+                "三星：设置 → 电池 → 后台使用限制 → 找到Drift → 取消限制"
+            else ->
+                "设置 → 电池 → 找到Drift → 允许后台运行"
+        }
+    }
+
+    private fun huaweiIntent() = Intent().apply {
+        component = ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")
+    }
+
+    private fun xiaomiIntent() = Intent().apply {
+        component = ComponentName("com.miui.powerkeeper", "com.miui.powerkeeper.ui.HiddenAppsConfigActivity")
+        putExtra("package_name", "com.drift.sleep")
+        putExtra("package_label", "Drift")
+    }
+
+    private fun oppoIntent() = Intent().apply {
+        component = ComponentName("com.coloros.oppoguardelf", "com.coloros.powermanager.fuelgaue.PowerUsageModelActivity")
+    }
+
+    private fun vivoIntent() = Intent().apply {
+        component = ComponentName("com.vivo.abe", "com.vivo.applicationbehaviorengine.ui.ExcessivePowerManagerActivity")
+    }
+
+    private fun samsungIntent() = Intent().apply {
+        component = ComponentName("com.samsung.android.lool", "com.samsung.android.sm.battery.ui.BatteryActivity")
+    }
+
+    private fun defaultIntent() = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/util/ShareCardGenerator.kt =====
+
+package com.drift.sleep.util
+
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.net.Uri
+import androidx.core.content.FileProvider
+import com.drift.sleep.data.SleepRecord
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+object ShareCardGenerator {
+
+    private const val CARD_WIDTH = 1080
+    private const val CARD_HEIGHT = 1440
+
+    fun generateAndShare(context: Context, record: SleepRecord) {
+        val bitmap = generateCard(record)
+        val file = saveBitmap(context, bitmap)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        shareImage(context, uri)
+    }
+
+    private fun generateCard(record: SleepRecord): Bitmap {
+        val bitmap = Bitmap.createBitmap(CARD_WIDTH, CARD_HEIGHT, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val dateFormat = SimpleDateFormat("M月d日 EEEE", Locale.CHINESE)
+        val startStr = timeFormat.format(Date(record.startTime))
+        val pauseStr = timeFormat.format(Date(record.pauseTime))
+        val dateStr = dateFormat.format(Date(record.pauseTime))
+        val durationMin = (record.pauseTime - record.startTime) / 60000
+
+        // Background gradient
+        val bgPaint = Paint()
+        bgPaint.shader = LinearGradient(
+            0f, 0f, 0f, CARD_HEIGHT.toFloat(),
+            intArrayOf(Color.parseColor("#060A10"), Color.parseColor("#0A1628"), Color.parseColor("#060A10")),
+            floatArrayOf(0f, 0.5f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawRoundRect(RectF(0f, 0f, CARD_WIDTH.toFloat(), CARD_HEIGHT.toFloat()), 48f, 48f, bgPaint)
+
+        // Title "drift"
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#E8ECF2")
+            textSize = 64f
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            letterSpacing = 0.3f
+        }
+        canvas.drawText("drift", 80f, 140f, titlePaint)
+
+        // Date
+        val datePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#4A5568")
+            textSize = 40f
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+        }
+        canvas.drawText(dateStr, 80f, 200f, datePaint)
+
+        // Divider line
+        val divPaint = Paint().apply { color = Color.parseColor("#1A2540"); strokeWidth = 2f }
+        canvas.drawLine(80f, 260f, CARD_WIDTH - 80f, 260f, divPaint)
+
+        // Moon emoji circle
+        val moonPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#D4A55A")
+            textSize = 120f
+        }
+        canvas.drawText("\uD83C\uDF19", (CARD_WIDTH / 2 - 60).toFloat(), 440f, moonPaint)
+
+        // Time range - big
+        val timePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#E8ECF2")
+            textSize = 96f
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("$startStr → $pauseStr", CARD_WIDTH / 2f, 600f, timePaint)
+
+        // Duration
+        val durPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#4A5568")
+            textSize = 44f
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("守护了 ${durationMin} 分钟", CARD_WIDTH / 2f, 680f, durPaint)
+
+        // Paused app
+        if (record.pausedApp != null) {
+            val appPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#D4A55A")
+                textSize = 48f
+                typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                textAlign = Paint.Align.CENTER
+            }
+            canvas.drawText("暂停了 ${record.pausedApp}", CARD_WIDTH / 2f, 800f, appPaint)
+        }
+
+        // Bottom branding
+        val brandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#2A3550")
+            textSize = 36f
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("Drift · 睡着自动暂停", CARD_WIDTH / 2f, (CARD_HEIGHT - 80).toFloat(), brandPaint)
+
+        return bitmap
+    }
+
+    private fun saveBitmap(context: Context, bitmap: Bitmap): File {
+        val dir = File(context.cacheDir, "share")
+        dir.mkdirs()
+        val file = File(dir, "drift_sleep_report.png")
+        FileOutputStream(file).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+        }
+        return file
+    }
+
+    private fun shareImage(context: Context, uri: Uri) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/png"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(Intent.createChooser(intent, "分享睡眠报告").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        })
+    }
+}
+
+
+// ===== app/src/main/java/com/drift/sleep/widget/DriftWidget.kt =====
+
+package com.drift.sleep.widget
+
+import android.app.PendingIntent
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProvider
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.widget.RemoteViews
+import androidx.core.content.ContextCompat
+import com.drift.sleep.R
+import com.drift.sleep.service.DriftService
+
+class DriftWidget : AppWidgetProvider() {
+
+    companion object {
+        const val ACTION_TOGGLE = "com.drift.sleep.widget.TOGGLE"
+
+        fun updateAllWidgets(context: Context) {
+            val manager = AppWidgetManager.getInstance(context)
+            val ids = manager.getAppWidgetIds(ComponentName(context, DriftWidget::class.java))
+            for (id in ids) {
+                updateWidget(context, manager, id)
+            }
+        }
+
+        private fun updateWidget(context: Context, manager: AppWidgetManager, widgetId: Int) {
+            val views = RemoteViews(context.packageName, R.layout.widget_drift)
+            val isRunning = DriftService.isRunning
+
+            views.setTextViewText(
+                R.id.widget_status,
+                if (isRunning) "正在守护" else "点击开始"
+            )
+            views.setTextViewText(
+                R.id.widget_button_text,
+                if (isRunning) "停止" else "开始"
+            )
+
+            val toggleIntent = Intent(context, DriftWidget::class.java).apply {
+                action = ACTION_TOGGLE
+            }
+            val pendingIntent = PendingIntent.getBroadcast(
+                context, 0, toggleIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            views.setOnClickPendingIntent(R.id.widget_root, pendingIntent)
+
+            manager.updateAppWidget(widgetId, views)
+        }
+    }
+
+    override fun onUpdate(context: Context, manager: AppWidgetManager, widgetIds: IntArray) {
+        for (id in widgetIds) {
+            updateWidget(context, manager, id)
+        }
+    }
+
+    override fun onReceive(context: Context, intent: Intent) {
+        super.onReceive(context, intent)
+        if (intent.action == ACTION_TOGGLE) {
+            if (DriftService.isRunning) {
+                context.stopService(Intent(context, DriftService::class.java))
+            } else {
+                ContextCompat.startForegroundService(
+                    context, Intent(context, DriftService::class.java)
+                )
+            }
+            // Update widget state after a short delay
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                updateAllWidgets(context)
+            }, 500)
+        }
+    }
+}
+
+
+// ===== app/src/main/AndroidManifest.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Drift"
+        tools:targetApi="35">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Drift">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".service.DriftService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false" />
+
+        <service
+            android:name=".service.MediaControlService"
+            android:label="Drift Media Control"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Widget -->
+        <receiver
+            android:name=".widget.DriftWidget"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.drift.sleep.widget.TOGGLE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info" />
+        </receiver>
+
+        <!-- FileProvider for share card -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <receiver
+            android:name=".receiver.AutoStartReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".receiver.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".receiver.ScreenStateReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.SCREEN_ON" />
+                <action android:name="android.intent.action.SCREEN_OFF" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>
+
+
+// ===== app/src/main/res/layout/widget_drift.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="@drawable/widget_background"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/widget_button_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="开始"
+        android:textColor="#FFD4A55A"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:fontFamily="sans-serif-light" />
+
+    <TextView
+        android:id="@+id/widget_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="点击开始"
+        android:textColor="#FF4A5568"
+        android:textSize="11sp"
+        android:layout_marginTop="4dp"
+        android:fontFamily="sans-serif-light" />
+
+</LinearLayout>
+
+
+// ===== app/src/main/res/drawable/ic_notification.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Moon crescent icon -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,3c-4.97,0 -9,4.03 -9,9s4.03,9 9,9c0.83,0 1.62,-0.12 2.39,-0.33C11.07,19.86 8.5,16.73 8.5,13c0,-4.08 2.76,-7.51 6.5,-8.53C13.87,3.17 12.96,3 12,3z" />
+</vector>
+
+
+// ===== app/src/main/res/drawable/widget_background.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#E6060A10" />
+    <corners android:radius="24dp" />
+    <stroke android:width="1dp" android:color="#201A2540" />
+</shape>
+
+
+// ===== app/src/main/res/xml/widget_info.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<appwidget-provider
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="110dp"
+    android:minHeight="40dp"
+    android:targetCellWidth="2"
+    android:targetCellHeight="1"
+    android:updatePeriodMillis="0"
+    android:initialLayout="@layout/widget_drift"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen"
+    android:previewLayout="@layout/widget_drift"
+    android:description="@string/widget_description" />
+
+
+// ===== app/src/main/res/xml/file_paths.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="share" path="share/" />
+</paths>
+
+
+// ===== app/src/main/res/values/strings.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Drift</string>
+    <string name="widget_description">一键启动/停止Drift睡眠守护</string>
+</resources>
+
+
+// ===== app/src/main/res/values/colors.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#0D1117</color>
+</resources>
+
+
+// ===== app/src/main/res/values/themes.xml =====
+
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Drift" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">#FF0D1117</item>
+        <item name="android:navigationBarColor">#FF0D1117</item>
+    </style>
+</resources>
+
+
+// ===== build.gradle.kts =====
+
+plugins {
+    id("com.android.application") version "8.7.3" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+    id("com.google.devtools.ksp") version "2.0.21-1.0.27" apply false
+}
+
+
+// ===== app/build.gradle.kts =====
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp")
+}
+
+android {
+    namespace = "com.drift.sleep"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.drift.sleep"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 1
+        versionName = "1.0.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("../drift-release.jks")
+            storePassword = "drift2026"
+            keyAlias = "drift"
+            keyPassword = "drift2026"
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    buildFeatures {
+        compose = true
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // Room
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
+}
+
+
+// ===== settings.gradle.kts =====
+
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "Drift"
+include(":app")
+
+
+// ===== gradle.properties =====
+
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+kotlin.code.style=official
+android.nonTransitiveRClass=true
+
+
